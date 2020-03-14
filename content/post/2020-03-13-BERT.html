@@ -1,0 +1,459 @@
+---
+title: "Implementing BERT in R"
+author: "Andrew Wohlfeil"
+date: "3/13/2020"
+output: 
+  blogdown::html_page:
+    toc: true
+    toc_depth: 1
+    number_sections: true
+---
+
+
+
+<pre class="r"><code>library(tidyverse)</code></pre>
+<pre><code>## ── Attaching packages ──────────────────────────────────────────────────────────────────────────────────── tidyverse 1.3.0 ──</code></pre>
+<pre><code>## ✓ ggplot2 3.2.1     ✓ purrr   0.3.3
+## ✓ tibble  2.1.3     ✓ dplyr   0.8.4
+## ✓ tidyr   1.0.2     ✓ stringr 1.4.0
+## ✓ readr   1.3.1     ✓ forcats 0.4.0</code></pre>
+<pre><code>## ── Conflicts ─────────────────────────────────────────────────────────────────────────────────────── tidyverse_conflicts() ──
+## x dplyr::filter() masks stats::filter()
+## x dplyr::lag()    masks stats::lag()</code></pre>
+<pre class="r"><code>library(glue)</code></pre>
+<pre><code>## 
+## Attaching package: &#39;glue&#39;</code></pre>
+<pre><code>## The following object is masked from &#39;package:dplyr&#39;:
+## 
+##     collapse</code></pre>
+<pre class="r"><code>library(keras)
+library(tidytext)
+library(textclean)
+library(reticulate)
+# set TF_KERAS=1
+Sys.setenv(TF_KERAS=1)</code></pre>
+<pre class="r"><code># tokenize text
+tokenize_fun = function(dataset, labels) {
+  c(indices, target, segments) %&lt;-% list(list(),list(),list())
+  target &lt;- as.matrix(labels)
+  colnames(target) &lt;- NULL
+  
+  for (i in 1:nrow(dataset)) {
+    c(indices_tok, segments_tok) %&lt;-% tokenizer$encode(dataset[[DATA_COLUMN]][i], 
+                                                       max_len=seq_length)
+    indices = indices %&gt;% append(list(as.matrix(indices_tok)))
+    segments = segments %&gt;% append(list(as.matrix(segments_tok)))
+  }
+  return(list(indices, segments, target))
+}
+
+# read data
+dt_data = function(dataset, labels){
+  c(x_train, x_segment, y_train) %&lt;-% tokenize_fun(text, labels)
+  return(list(x_train, x_segment, y_train))
+}
+
+inverse_to_categorical &lt;- function(mat){
+  apply(mat, 1, function(row) which(row==max(row))-1)
+}
+
+cleanTextFunction &lt;- function(text_clean){
+  x &lt;- gsub(&quot;#&quot;,&quot;&quot;, text_clean) 
+  x &lt;- gsub(&quot;[a-zA-Z]-[1-9]\\w+&quot;, &quot;&lt;highway&gt;&quot;, x) 
+  x &lt;- gsub(&quot; W &quot;, &quot;&lt;west&gt;&quot; , x) 
+  x &lt;- gsub(&quot; E &quot;, &quot;&lt;east&gt;&quot; , x) 
+  x &lt;- gsub(&quot; S &quot;, &quot;&lt;south&gt;&quot; , x) 
+  x &lt;- gsub(&quot; N &quot;, &quot;&lt;north&gt;&quot; , x) 
+  x &lt;- gsub(&quot;@\\w+&quot;, &quot;&lt;twitter handle&gt;&quot;, x) 
+  x = gsub(&quot;(http[^ ]*)&quot;, &quot;&quot;, x)
+  
+  return(x)
+}
+
+# data prep function
+dataPrep &lt;- function(df){
+  df %&gt;% 
+    mutate(text_clean = tolower(text),
+           text_clean = cleanTextFunction(text_clean),
+           label = if_else(ideology == &quot;liberal&quot;, 0, 
+                           if_else(ideology == &quot;conservative&quot;, 1, 2)),
+           text_length = str_count(text_clean, &quot;\\w+&quot;)) %&gt;% 
+    # filtering out documents with zero words
+    filter(text_length &gt; 0)
+} 
+
+# sequencing the text to length 650
+sequenceFunction &lt;- function(text){
+  texts_to_sequences(tokenizer, text) %&gt;% 
+    pad_sequences(maxlen = maxlen)
+}</code></pre>
+<pre class="r"><code>data &lt;- read_csv(&quot;~/Documents/gitrepos/data/nlp-getting-started/socialmedia-disaster-tweets-DFE.csv&quot;)</code></pre>
+<pre><code>## Parsed with column specification:
+## cols(
+##   `_unit_id` = col_double(),
+##   `_golden` = col_logical(),
+##   `_unit_state` = col_character(),
+##   `_trusted_judgments` = col_double(),
+##   `_last_judgment_at` = col_character(),
+##   choose_one = col_character(),
+##   `choose_one:confidence` = col_double(),
+##   choose_one_gold = col_character(),
+##   keyword = col_character(),
+##   location = col_character(),
+##   text = col_character(),
+##   tweetid = col_double(),
+##   userid = col_double()
+## )</code></pre>
+<pre class="r"><code>data_clean &lt;- data %&gt;% 
+  filter(choose_one != &quot;Can&#39;t Decide&quot;) %&gt;% 
+  mutate(target = case_when(choose_one == &quot;Relevant&quot; ~ 1,
+                            choose_one == &quot;Not Relevant&quot; ~ 0),
+         text_clean = replace_internet_slang(text),
+         text_clean = cleanTextFunction(text_clean),
+         text_clean = iconv(text_clean, &quot;latin1&quot;, &quot;ASCII&quot;, sub=&quot;&quot;),
+         text_clean = tolower(text_clean)) %&gt;% 
+  select(target, text_clean)</code></pre>
+<pre class="r"><code>obs &lt;- nrow(data_clean)
+set.seed(324)
+randomize &lt;- sample(seq_len(obs), size = obs*.8, replace = FALSE)
+train &lt;- data_clean[randomize, ]
+test &lt;- data_clean[-randomize, ]</code></pre>
+<pre class="r"><code>text_train &lt;- train %&gt;% 
+  mutate(text_length = str_count(text_clean, &quot;\\w+&quot;))
+
+# pulling all word tokens
+word_tokens &lt;- train %&gt;% 
+  unnest_tokens(word, text_clean, to_lower = TRUE) %&gt;% 
+  pull(word)
+
+# calculating unique words
+count_unique_words &lt;- word_tokens %&gt;% 
+  n_distinct()
+
+# calulating median document length
+median_document_length &lt;- median(text_train$text_length, na.rm = TRUE)
+
+# plotting histogram of all documents
+text_train %&gt;% 
+  ggplot(aes(text_length)) +
+  geom_histogram(bins = 30, fill = &quot;grey70&quot;, color = &quot;grey40&quot;) +
+  geom_vline(xintercept = median_document_length, color = &quot;red&quot;, lty = &quot;dashed&quot;) +
+  scale_x_log10(&quot;# words&quot;) +
+  ggtitle(glue(&quot;Median document length is {median_document_length} words&quot;),
+          subtitle = glue(&quot;Total number of unique words is {count_unique_words}&quot;))</code></pre>
+<p><img src="/post/2020-03-13-BERT_files/figure-html/text%20length-1.png" width="672" /></p>
+<pre class="r"><code>labels &lt;- as.numeric(train$target)
+text &lt;- tibble(text = train$text_clean)</code></pre>
+<pre class="r"><code># estabihing file paths
+pretrained_path = c(&quot;/Users/andrewwohlfeil/Downloads/uncased_L-12_H-768_A-12&quot;)
+config_path = file.path(pretrained_path, &quot;bert_config.json&quot;)
+checkpoint_path = file.path(pretrained_path, &quot;bert_model.ckpt&quot;)
+vocab_path = file.path(pretrained_path, &quot;vocab.txt&quot;)
+
+# check to make sure bert model is available
+reticulate::py_module_available(&quot;keras_bert&quot;)</code></pre>
+<pre><code>## [1] TRUE</code></pre>
+<pre class="r"><code># loading bert model and tokenizer
+k_bert &lt;- import(&#39;keras_bert&#39;)
+token_dict &lt;- k_bert$load_vocabulary(vocab_path = vocab_path)
+tokenizer &lt;- k_bert$Tokenizer(token_dict)</code></pre>
+<pre class="r"><code># creating hyperparameters for model
+seq_length &lt;- 100L
+bch_size &lt;- 32
+epochs &lt;- 10
+learning_rate &lt;- 1e-4
+
+DATA_COLUMN &lt;- &#39;text&#39;</code></pre>
+<pre class="r"><code>model &lt;- k_bert$load_trained_model_from_checkpoint(
+  config_path,
+  checkpoint_path,
+  training=T,
+  trainable=T,
+  seq_len=seq_length)
+
+c(x_train, x_segment, y_train) %&lt;-% 
+  dt_data(text, labels)
+
+train &lt;- do.call(cbind, x_train) %&gt;% t()
+segments &lt;- do.call(cbind, x_segment) %&gt;% t()
+concat &lt;- c(list(train ), list(segments))
+
+c(decay_steps, warmup_steps) %&lt;-% k_bert$calc_train_steps(
+  y_train %&gt;% length(),
+  batch_size=bch_size,
+  epochs=epochs
+)</code></pre>
+<pre class="r"><code>input_1 &lt;- get_layer(model, name = &#39;Input-Token&#39;)$input
+input_2 &lt;- get_layer(model, name = &#39;Input-Segment&#39;)$input
+inputs &lt;- list(input_1, input_2)
+
+dense &lt;- get_layer(model,name = &#39;NSP-Dense&#39;)$output
+
+outputs &lt;- dense %&gt;% 
+  layer_dense(units=1L, activation=&#39;sigmoid&#39;,
+              kernel_initializer=initializer_truncated_normal(stddev = 0.02),
+              name = &#39;output&#39;)
+
+model &lt;- keras_model(inputs = inputs, outputs = outputs)
+freeze_weights(model, from = &quot;NSP-Dense&quot;)
+summary(model)</code></pre>
+<pre><code>## Model: &quot;model_1&quot;
+## ________________________________________________________________________________
+## Layer (type)              Output Shape      Param #  Connected to               
+## ================================================================================
+## Input-Token (InputLayer)  [(None, 100)]     0                                   
+## ________________________________________________________________________________
+## Input-Segment (InputLayer [(None, 100)]     0                                   
+## ________________________________________________________________________________
+## Embedding-Token (TokenEmb [(None, 100, 768) 23440896 Input-Token[0][0]          
+## ________________________________________________________________________________
+## Embedding-Segment (Embedd (None, 100, 768)  1536     Input-Segment[0][0]        
+## ________________________________________________________________________________
+## Embedding-Token-Segment ( (None, 100, 768)  0        Embedding-Token[0][0]      
+##                                                      Embedding-Segment[0][0]    
+## ________________________________________________________________________________
+## Embedding-Position (Posit (None, 100, 768)  76800    Embedding-Token-Segment[0][
+## ________________________________________________________________________________
+## Embedding-Dropout (Dropou (None, 100, 768)  0        Embedding-Position[0][0]   
+## ________________________________________________________________________________
+## Embedding-Norm (LayerNorm (None, 100, 768)  1536     Embedding-Dropout[0][0]    
+## ________________________________________________________________________________
+## Encoder-1-MultiHeadSelfAt (None, 100, 768)  2362368  Embedding-Norm[0][0]       
+## ________________________________________________________________________________
+## Encoder-1-MultiHeadSelfAt (None, 100, 768)  0        Encoder-1-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-1-MultiHeadSelfAt (None, 100, 768)  0        Embedding-Norm[0][0]       
+##                                                      Encoder-1-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-1-MultiHeadSelfAt (None, 100, 768)  1536     Encoder-1-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-1-FeedForward (Fe (None, 100, 768)  4722432  Encoder-1-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-1-FeedForward-Dro (None, 100, 768)  0        Encoder-1-FeedForward[0][0]
+## ________________________________________________________________________________
+## Encoder-1-FeedForward-Add (None, 100, 768)  0        Encoder-1-MultiHeadSelfAtte
+##                                                      Encoder-1-FeedForward-Dropo
+## ________________________________________________________________________________
+## Encoder-1-FeedForward-Nor (None, 100, 768)  1536     Encoder-1-FeedForward-Add[0
+## ________________________________________________________________________________
+## Encoder-2-MultiHeadSelfAt (None, 100, 768)  2362368  Encoder-1-FeedForward-Norm[
+## ________________________________________________________________________________
+## Encoder-2-MultiHeadSelfAt (None, 100, 768)  0        Encoder-2-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-2-MultiHeadSelfAt (None, 100, 768)  0        Encoder-1-FeedForward-Norm[
+##                                                      Encoder-2-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-2-MultiHeadSelfAt (None, 100, 768)  1536     Encoder-2-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-2-FeedForward (Fe (None, 100, 768)  4722432  Encoder-2-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-2-FeedForward-Dro (None, 100, 768)  0        Encoder-2-FeedForward[0][0]
+## ________________________________________________________________________________
+## Encoder-2-FeedForward-Add (None, 100, 768)  0        Encoder-2-MultiHeadSelfAtte
+##                                                      Encoder-2-FeedForward-Dropo
+## ________________________________________________________________________________
+## Encoder-2-FeedForward-Nor (None, 100, 768)  1536     Encoder-2-FeedForward-Add[0
+## ________________________________________________________________________________
+## Encoder-3-MultiHeadSelfAt (None, 100, 768)  2362368  Encoder-2-FeedForward-Norm[
+## ________________________________________________________________________________
+## Encoder-3-MultiHeadSelfAt (None, 100, 768)  0        Encoder-3-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-3-MultiHeadSelfAt (None, 100, 768)  0        Encoder-2-FeedForward-Norm[
+##                                                      Encoder-3-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-3-MultiHeadSelfAt (None, 100, 768)  1536     Encoder-3-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-3-FeedForward (Fe (None, 100, 768)  4722432  Encoder-3-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-3-FeedForward-Dro (None, 100, 768)  0        Encoder-3-FeedForward[0][0]
+## ________________________________________________________________________________
+## Encoder-3-FeedForward-Add (None, 100, 768)  0        Encoder-3-MultiHeadSelfAtte
+##                                                      Encoder-3-FeedForward-Dropo
+## ________________________________________________________________________________
+## Encoder-3-FeedForward-Nor (None, 100, 768)  1536     Encoder-3-FeedForward-Add[0
+## ________________________________________________________________________________
+## Encoder-4-MultiHeadSelfAt (None, 100, 768)  2362368  Encoder-3-FeedForward-Norm[
+## ________________________________________________________________________________
+## Encoder-4-MultiHeadSelfAt (None, 100, 768)  0        Encoder-4-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-4-MultiHeadSelfAt (None, 100, 768)  0        Encoder-3-FeedForward-Norm[
+##                                                      Encoder-4-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-4-MultiHeadSelfAt (None, 100, 768)  1536     Encoder-4-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-4-FeedForward (Fe (None, 100, 768)  4722432  Encoder-4-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-4-FeedForward-Dro (None, 100, 768)  0        Encoder-4-FeedForward[0][0]
+## ________________________________________________________________________________
+## Encoder-4-FeedForward-Add (None, 100, 768)  0        Encoder-4-MultiHeadSelfAtte
+##                                                      Encoder-4-FeedForward-Dropo
+## ________________________________________________________________________________
+## Encoder-4-FeedForward-Nor (None, 100, 768)  1536     Encoder-4-FeedForward-Add[0
+## ________________________________________________________________________________
+## Encoder-5-MultiHeadSelfAt (None, 100, 768)  2362368  Encoder-4-FeedForward-Norm[
+## ________________________________________________________________________________
+## Encoder-5-MultiHeadSelfAt (None, 100, 768)  0        Encoder-5-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-5-MultiHeadSelfAt (None, 100, 768)  0        Encoder-4-FeedForward-Norm[
+##                                                      Encoder-5-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-5-MultiHeadSelfAt (None, 100, 768)  1536     Encoder-5-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-5-FeedForward (Fe (None, 100, 768)  4722432  Encoder-5-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-5-FeedForward-Dro (None, 100, 768)  0        Encoder-5-FeedForward[0][0]
+## ________________________________________________________________________________
+## Encoder-5-FeedForward-Add (None, 100, 768)  0        Encoder-5-MultiHeadSelfAtte
+##                                                      Encoder-5-FeedForward-Dropo
+## ________________________________________________________________________________
+## Encoder-5-FeedForward-Nor (None, 100, 768)  1536     Encoder-5-FeedForward-Add[0
+## ________________________________________________________________________________
+## Encoder-6-MultiHeadSelfAt (None, 100, 768)  2362368  Encoder-5-FeedForward-Norm[
+## ________________________________________________________________________________
+## Encoder-6-MultiHeadSelfAt (None, 100, 768)  0        Encoder-6-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-6-MultiHeadSelfAt (None, 100, 768)  0        Encoder-5-FeedForward-Norm[
+##                                                      Encoder-6-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-6-MultiHeadSelfAt (None, 100, 768)  1536     Encoder-6-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-6-FeedForward (Fe (None, 100, 768)  4722432  Encoder-6-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-6-FeedForward-Dro (None, 100, 768)  0        Encoder-6-FeedForward[0][0]
+## ________________________________________________________________________________
+## Encoder-6-FeedForward-Add (None, 100, 768)  0        Encoder-6-MultiHeadSelfAtte
+##                                                      Encoder-6-FeedForward-Dropo
+## ________________________________________________________________________________
+## Encoder-6-FeedForward-Nor (None, 100, 768)  1536     Encoder-6-FeedForward-Add[0
+## ________________________________________________________________________________
+## Encoder-7-MultiHeadSelfAt (None, 100, 768)  2362368  Encoder-6-FeedForward-Norm[
+## ________________________________________________________________________________
+## Encoder-7-MultiHeadSelfAt (None, 100, 768)  0        Encoder-7-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-7-MultiHeadSelfAt (None, 100, 768)  0        Encoder-6-FeedForward-Norm[
+##                                                      Encoder-7-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-7-MultiHeadSelfAt (None, 100, 768)  1536     Encoder-7-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-7-FeedForward (Fe (None, 100, 768)  4722432  Encoder-7-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-7-FeedForward-Dro (None, 100, 768)  0        Encoder-7-FeedForward[0][0]
+## ________________________________________________________________________________
+## Encoder-7-FeedForward-Add (None, 100, 768)  0        Encoder-7-MultiHeadSelfAtte
+##                                                      Encoder-7-FeedForward-Dropo
+## ________________________________________________________________________________
+## Encoder-7-FeedForward-Nor (None, 100, 768)  1536     Encoder-7-FeedForward-Add[0
+## ________________________________________________________________________________
+## Encoder-8-MultiHeadSelfAt (None, 100, 768)  2362368  Encoder-7-FeedForward-Norm[
+## ________________________________________________________________________________
+## Encoder-8-MultiHeadSelfAt (None, 100, 768)  0        Encoder-8-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-8-MultiHeadSelfAt (None, 100, 768)  0        Encoder-7-FeedForward-Norm[
+##                                                      Encoder-8-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-8-MultiHeadSelfAt (None, 100, 768)  1536     Encoder-8-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-8-FeedForward (Fe (None, 100, 768)  4722432  Encoder-8-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-8-FeedForward-Dro (None, 100, 768)  0        Encoder-8-FeedForward[0][0]
+## ________________________________________________________________________________
+## Encoder-8-FeedForward-Add (None, 100, 768)  0        Encoder-8-MultiHeadSelfAtte
+##                                                      Encoder-8-FeedForward-Dropo
+## ________________________________________________________________________________
+## Encoder-8-FeedForward-Nor (None, 100, 768)  1536     Encoder-8-FeedForward-Add[0
+## ________________________________________________________________________________
+## Encoder-9-MultiHeadSelfAt (None, 100, 768)  2362368  Encoder-8-FeedForward-Norm[
+## ________________________________________________________________________________
+## Encoder-9-MultiHeadSelfAt (None, 100, 768)  0        Encoder-9-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-9-MultiHeadSelfAt (None, 100, 768)  0        Encoder-8-FeedForward-Norm[
+##                                                      Encoder-9-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-9-MultiHeadSelfAt (None, 100, 768)  1536     Encoder-9-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-9-FeedForward (Fe (None, 100, 768)  4722432  Encoder-9-MultiHeadSelfAtte
+## ________________________________________________________________________________
+## Encoder-9-FeedForward-Dro (None, 100, 768)  0        Encoder-9-FeedForward[0][0]
+## ________________________________________________________________________________
+## Encoder-9-FeedForward-Add (None, 100, 768)  0        Encoder-9-MultiHeadSelfAtte
+##                                                      Encoder-9-FeedForward-Dropo
+## ________________________________________________________________________________
+## Encoder-9-FeedForward-Nor (None, 100, 768)  1536     Encoder-9-FeedForward-Add[0
+## ________________________________________________________________________________
+## Encoder-10-MultiHeadSelfA (None, 100, 768)  2362368  Encoder-9-FeedForward-Norm[
+## ________________________________________________________________________________
+## Encoder-10-MultiHeadSelfA (None, 100, 768)  0        Encoder-10-MultiHeadSelfAtt
+## ________________________________________________________________________________
+## Encoder-10-MultiHeadSelfA (None, 100, 768)  0        Encoder-9-FeedForward-Norm[
+##                                                      Encoder-10-MultiHeadSelfAtt
+## ________________________________________________________________________________
+## Encoder-10-MultiHeadSelfA (None, 100, 768)  1536     Encoder-10-MultiHeadSelfAtt
+## ________________________________________________________________________________
+## Encoder-10-FeedForward (F (None, 100, 768)  4722432  Encoder-10-MultiHeadSelfAtt
+## ________________________________________________________________________________
+## Encoder-10-FeedForward-Dr (None, 100, 768)  0        Encoder-10-FeedForward[0][0
+## ________________________________________________________________________________
+## Encoder-10-FeedForward-Ad (None, 100, 768)  0        Encoder-10-MultiHeadSelfAtt
+##                                                      Encoder-10-FeedForward-Drop
+## ________________________________________________________________________________
+## Encoder-10-FeedForward-No (None, 100, 768)  1536     Encoder-10-FeedForward-Add[
+## ________________________________________________________________________________
+## Encoder-11-MultiHeadSelfA (None, 100, 768)  2362368  Encoder-10-FeedForward-Norm
+## ________________________________________________________________________________
+## Encoder-11-MultiHeadSelfA (None, 100, 768)  0        Encoder-11-MultiHeadSelfAtt
+## ________________________________________________________________________________
+## Encoder-11-MultiHeadSelfA (None, 100, 768)  0        Encoder-10-FeedForward-Norm
+##                                                      Encoder-11-MultiHeadSelfAtt
+## ________________________________________________________________________________
+## Encoder-11-MultiHeadSelfA (None, 100, 768)  1536     Encoder-11-MultiHeadSelfAtt
+## ________________________________________________________________________________
+## Encoder-11-FeedForward (F (None, 100, 768)  4722432  Encoder-11-MultiHeadSelfAtt
+## ________________________________________________________________________________
+## Encoder-11-FeedForward-Dr (None, 100, 768)  0        Encoder-11-FeedForward[0][0
+## ________________________________________________________________________________
+## Encoder-11-FeedForward-Ad (None, 100, 768)  0        Encoder-11-MultiHeadSelfAtt
+##                                                      Encoder-11-FeedForward-Drop
+## ________________________________________________________________________________
+## Encoder-11-FeedForward-No (None, 100, 768)  1536     Encoder-11-FeedForward-Add[
+## ________________________________________________________________________________
+## Encoder-12-MultiHeadSelfA (None, 100, 768)  2362368  Encoder-11-FeedForward-Norm
+## ________________________________________________________________________________
+## Encoder-12-MultiHeadSelfA (None, 100, 768)  0        Encoder-12-MultiHeadSelfAtt
+## ________________________________________________________________________________
+## Encoder-12-MultiHeadSelfA (None, 100, 768)  0        Encoder-11-FeedForward-Norm
+##                                                      Encoder-12-MultiHeadSelfAtt
+## ________________________________________________________________________________
+## Encoder-12-MultiHeadSelfA (None, 100, 768)  1536     Encoder-12-MultiHeadSelfAtt
+## ________________________________________________________________________________
+## Encoder-12-FeedForward (F (None, 100, 768)  4722432  Encoder-12-MultiHeadSelfAtt
+## ________________________________________________________________________________
+## Encoder-12-FeedForward-Dr (None, 100, 768)  0        Encoder-12-FeedForward[0][0
+## ________________________________________________________________________________
+## Encoder-12-FeedForward-Ad (None, 100, 768)  0        Encoder-12-MultiHeadSelfAtt
+##                                                      Encoder-12-FeedForward-Drop
+## ________________________________________________________________________________
+## Encoder-12-FeedForward-No (None, 100, 768)  1536     Encoder-12-FeedForward-Add[
+## ________________________________________________________________________________
+## Extract (Extract)         (None, 768)       0        Encoder-12-FeedForward-Norm
+## ________________________________________________________________________________
+## NSP-Dense (Dense)         (None, 768)       590592   Extract[0][0]              
+## ________________________________________________________________________________
+## output (Dense)            (None, 1)         769      NSP-Dense[0][0]            
+## ================================================================================
+## Total params: 109,166,593
+## Trainable params: 108,575,232
+## Non-trainable params: 591,361
+## ________________________________________________________________________________</code></pre>
+<pre class="r"><code>model %&gt;% compile(
+  k_bert$AdamWarmup(decay_steps=decay_steps, 
+                    warmup_steps=warmup_steps, 
+                    lr=learning_rate),
+  loss = &#39;binary_crossentropy&#39;,
+  metrics = &#39;accuracy&#39;
+)</code></pre>
+<pre class="r"><code>history &lt;- model %&gt;% fit(
+  concat,
+  y_train,
+  epochs=epochs,
+  batch_size=bch_size, 
+  validation_split=0.2)</code></pre>

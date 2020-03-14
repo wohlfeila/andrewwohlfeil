@@ -1,0 +1,228 @@
+---
+title: "Implementing BERT in R"
+author: "Andrew Wohlfeil"
+date: "3/13/2020"
+output: 
+  blogdown::html_page:
+    toc: true
+    toc_depth: 1
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages}
+library(tidyverse)
+library(glue)
+library(keras)
+library(tidytext)
+library(textclean)
+library(reticulate)
+# set TF_KERAS=1
+Sys.setenv(TF_KERAS=1)
+```
+
+
+```{r functions}
+# tokenize text
+tokenize_fun = function(dataset, labels) {
+  c(indices, target, segments) %<-% list(list(),list(),list())
+  target <- as.matrix(labels)
+  colnames(target) <- NULL
+  
+  for (i in 1:nrow(dataset)) {
+    c(indices_tok, segments_tok) %<-% tokenizer$encode(dataset[[DATA_COLUMN]][i], 
+                                                       max_len=seq_length)
+    indices = indices %>% append(list(as.matrix(indices_tok)))
+    segments = segments %>% append(list(as.matrix(segments_tok)))
+  }
+  return(list(indices, segments, target))
+}
+
+# read data
+dt_data = function(dataset, labels){
+  c(x_train, x_segment, y_train) %<-% tokenize_fun(text, labels)
+  return(list(x_train, x_segment, y_train))
+}
+
+inverse_to_categorical <- function(mat){
+  apply(mat, 1, function(row) which(row==max(row))-1)
+}
+
+cleanTextFunction <- function(text_clean){
+  x <- gsub("#","", text_clean) 
+  x <- gsub("[a-zA-Z]-[1-9]\\w+", "<highway>", x) 
+  x <- gsub(" W ", "<west>" , x) 
+  x <- gsub(" E ", "<east>" , x) 
+  x <- gsub(" S ", "<south>" , x) 
+  x <- gsub(" N ", "<north>" , x) 
+  x <- gsub("@\\w+", "<twitter handle>", x) 
+  x = gsub("(http[^ ]*)", "", x)
+  
+  return(x)
+}
+
+# data prep function
+dataPrep <- function(df){
+  df %>% 
+    mutate(text_clean = tolower(text),
+           text_clean = cleanTextFunction(text_clean),
+           label = if_else(ideology == "liberal", 0, 
+                           if_else(ideology == "conservative", 1, 2)),
+           text_length = str_count(text_clean, "\\w+")) %>% 
+    # filtering out documents with zero words
+    filter(text_length > 0)
+} 
+
+# sequencing the text to length 650
+sequenceFunction <- function(text){
+  texts_to_sequences(tokenizer, text) %>% 
+    pad_sequences(maxlen = maxlen)
+}
+```
+
+
+```{r data prep}
+data <- read_csv("~/Documents/gitrepos/data/nlp-getting-started/socialmedia-disaster-tweets-DFE.csv")
+
+data_clean <- data %>% 
+  filter(choose_one != "Can't Decide") %>% 
+  mutate(target = case_when(choose_one == "Relevant" ~ 1,
+                            choose_one == "Not Relevant" ~ 0),
+         text_clean = replace_internet_slang(text),
+         text_clean = cleanTextFunction(text_clean),
+         text_clean = iconv(text_clean, "latin1", "ASCII", sub=""),
+         text_clean = tolower(text_clean)) %>% 
+  select(target, text_clean)
+```
+
+```{r text/train split}
+obs <- nrow(data_clean)
+set.seed(324)
+randomize <- sample(seq_len(obs), size = obs*.8, replace = FALSE)
+train <- data_clean[randomize, ]
+test <- data_clean[-randomize, ]
+```
+
+```{r text length}
+text_train <- train %>% 
+  mutate(text_length = str_count(text_clean, "\\w+"))
+
+# pulling all word tokens
+word_tokens <- train %>% 
+  unnest_tokens(word, text_clean, to_lower = TRUE) %>% 
+  pull(word)
+
+# calculating unique words
+count_unique_words <- word_tokens %>% 
+  n_distinct()
+
+# calulating median document length
+median_document_length <- median(text_train$text_length, na.rm = TRUE)
+
+# plotting histogram of all documents
+text_train %>% 
+  ggplot(aes(text_length)) +
+  geom_histogram(bins = 30, fill = "grey70", color = "grey40") +
+  geom_vline(xintercept = median_document_length, color = "red", lty = "dashed") +
+  scale_x_log10("# words") +
+  ggtitle(glue("Median document length is {median_document_length} words"),
+          subtitle = glue("Total number of unique words is {count_unique_words}"))
+```
+
+
+```{r prep for BERT}
+labels <- as.numeric(train$target)
+text <- tibble(text = train$text_clean)
+```
+
+```{r load BERT}
+# estabihing file paths
+pretrained_path = c("/Users/andrewwohlfeil/Downloads/uncased_L-12_H-768_A-12")
+config_path = file.path(pretrained_path, "bert_config.json")
+checkpoint_path = file.path(pretrained_path, "bert_model.ckpt")
+vocab_path = file.path(pretrained_path, "vocab.txt")
+
+# check to make sure bert model is available
+reticulate::py_module_available("keras_bert")
+```
+
+```{r BERT tokenizer}
+# loading bert model and tokenizer
+k_bert <- import('keras_bert')
+token_dict <- k_bert$load_vocabulary(vocab_path = vocab_path)
+tokenizer <- k_bert$Tokenizer(token_dict)
+```
+
+
+```{r parameters}
+# creating hyperparameters for model
+seq_length <- 100L
+bch_size <- 32
+epochs <- 10
+learning_rate <- 1e-4
+
+DATA_COLUMN <- 'text'
+```
+
+```{r}
+model <- k_bert$load_trained_model_from_checkpoint(
+  config_path,
+  checkpoint_path,
+  training=T,
+  trainable=T,
+  seq_len=seq_length)
+
+c(x_train, x_segment, y_train) %<-% 
+  dt_data(text, labels)
+
+train <- do.call(cbind, x_train) %>% t()
+segments <- do.call(cbind, x_segment) %>% t()
+concat <- c(list(train ), list(segments))
+
+c(decay_steps, warmup_steps) %<-% k_bert$calc_train_steps(
+  y_train %>% length(),
+  batch_size=bch_size,
+  epochs=epochs
+)
+```
+
+```{r building model}
+input_1 <- get_layer(model, name = 'Input-Token')$input
+input_2 <- get_layer(model, name = 'Input-Segment')$input
+inputs <- list(input_1, input_2)
+
+dense <- get_layer(model,name = 'NSP-Dense')$output
+
+outputs <- dense %>% 
+  layer_dense(units=1L, activation='sigmoid',
+              kernel_initializer=initializer_truncated_normal(stddev = 0.02),
+              name = 'output')
+
+model <- keras_model(inputs = inputs, outputs = outputs)
+freeze_weights(model, from = "NSP-Dense")
+summary(model)
+```
+
+
+```{r}
+model %>% compile(
+  k_bert$AdamWarmup(decay_steps=decay_steps, 
+                    warmup_steps=warmup_steps, 
+                    lr=learning_rate),
+  loss = 'binary_crossentropy',
+  metrics = 'accuracy'
+)
+```
+
+
+```{r, eval=FALSE}
+history <- model %>% fit(
+  concat,
+  y_train,
+  epochs=epochs,
+  batch_size=bch_size, 
+  validation_split=0.2)
+```
