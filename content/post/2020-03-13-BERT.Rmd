@@ -18,13 +18,14 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 
-```{r packages}
+```{r packages, echo=FALSE}
 library(tidyverse)
 library(glue)
 library(keras)
 library(tidytext)
 library(textclean)
 library(reticulate)
+
 # set TF_KERAS=1
 Sys.setenv(TF_KERAS=1)
 ```
@@ -90,34 +91,33 @@ sequenceFunction <- function(text){
 
 
 ```{r data prep}
-data <- read_csv("~/Documents/gitrepos/data/nlp-getting-started/socialmedia-disaster-tweets-DFE.csv")
+data <- read_csv("~/Documents/gitrepos/politicalblogclassification/data/train.csv")
 
 data_clean <- data %>% 
-  filter(choose_one != "Can't Decide") %>% 
-  mutate(target = case_when(choose_one == "Relevant" ~ 1,
-                            choose_one == "Not Relevant" ~ 0),
-         text_clean = replace_internet_slang(text),
-         text_clean = cleanTextFunction(text_clean),
-         text_clean = iconv(text_clean, "latin1", "ASCII", sub=""),
-         text_clean = tolower(text_clean)) %>% 
-  select(target, text_clean)
+  mutate(ideology = replace_na(ideology, "liberal"),
+         target = case_when(ideology == "center" ~ 0,
+                            ideology == "liberal" ~ 1,
+                            ideology == "conservative" ~ 2)) %>% 
+  select(target, clean_text)
 ```
 
-```{r text/train split}
-obs <- nrow(data_clean)
-set.seed(324)
-randomize <- sample(seq_len(obs), size = obs*.8, replace = FALSE)
-train <- data_clean[randomize, ]
-test <- data_clean[-randomize, ]
+
+```{r text/train split, include=FALSE}
+# obs <- nrow(data_clean)
+# set.seed(324)
+# randomize <- sample(seq_len(obs), size = obs*.8, replace = FALSE)
+# train <- data_clean[randomize, ]
+# test <- data_clean[-randomize, ]
 ```
+
 
 ```{r text length}
-text_train <- train %>% 
-  mutate(text_length = str_count(text_clean, "\\w+"))
+text_train <- data_clean %>% 
+  mutate(text_length = str_count(clean_text, "\\w+"))
 
 # pulling all word tokens
-word_tokens <- train %>% 
-  unnest_tokens(word, text_clean, to_lower = TRUE) %>% 
+word_tokens <- data_clean %>% 
+  unnest_tokens(word, clean_text, to_lower = TRUE) %>% 
   pull(word)
 
 # calculating unique words
@@ -138,10 +138,11 @@ text_train %>%
 ```
 
 
-```{r prep for BERT}
-labels <- as.numeric(train$target)
-text <- tibble(text = train$text_clean)
+```{r prep for BERT, include=FALSE}
+labels <- to_categorical(data_clean$target)
+text <- tibble(text = data_clean$clean_text)
 ```
+
 
 ```{r load BERT}
 # estabihing file paths
@@ -153,6 +154,7 @@ vocab_path = file.path(pretrained_path, "vocab.txt")
 # check to make sure bert model is available
 reticulate::py_module_available("keras_bert")
 ```
+
 
 ```{r BERT tokenizer}
 # loading bert model and tokenizer
@@ -166,11 +168,12 @@ tokenizer <- k_bert$Tokenizer(token_dict)
 # creating hyperparameters for model
 seq_length <- 100L
 bch_size <- 32
-epochs <- 10
-learning_rate <- 1e-4
+epochs <- 1
+learning_rate <- 1e-3
 
 DATA_COLUMN <- 'text'
 ```
+
 
 ```{r}
 model <- k_bert$load_trained_model_from_checkpoint(
@@ -194,6 +197,7 @@ c(decay_steps, warmup_steps) %<-% k_bert$calc_train_steps(
 )
 ```
 
+
 ```{r building model}
 input_1 <- get_layer(model, name = 'Input-Token')$input
 input_2 <- get_layer(model, name = 'Input-Segment')$input
@@ -202,7 +206,7 @@ inputs <- list(input_1, input_2)
 dense <- get_layer(model,name = 'NSP-Dense')$output
 
 outputs <- dense %>% 
-  layer_dense(units=1L, activation='sigmoid',
+  layer_dense(units=3L, activation='softmax',
               kernel_initializer=initializer_truncated_normal(stddev = 0.02),
               name = 'output')
 
@@ -217,8 +221,8 @@ model %>% compile(
   k_bert$AdamWarmup(decay_steps=decay_steps, 
                     warmup_steps=warmup_steps, 
                     lr=learning_rate),
-  loss = 'binary_crossentropy',
-  metrics = 'accuracy'
+  loss = 'categorical_crossentropy',
+  metrics = 'categorical_accuracy'
 )
 ```
 
@@ -231,3 +235,4 @@ history <- model %>% fit(
   batch_size=bch_size, 
   validation_split=0.2)
 ```
+
