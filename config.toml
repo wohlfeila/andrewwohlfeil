@@ -10,14 +10,20 @@ ignoreFiles = ["\\.Rmd$", "\\.Rmarkdown$", "_files$", "_cache$"]
     post = "/:year/:month/:day/:slug/"
 
 [[menu.main]]
-    name = "About"
-    url = "/about/"
+  name = "Home"
+  url = "/about"
+  weight = 1
 [[menu.main]]
-    name = "GitHub"
-    url = "https://github.com/wohlfeila/"
-[[menu.main]]
-    name = "Twitter"
-    url = "https://twitter.com/AndrewWohlfeil/"
+  name = "Contact"
+  url = "/contact"
+  weight = 6    
+
+#[[menu.main]]
+#    name = "GitHub"
+#    url = "https://github.com/wohlfeila/"
+#[[menu.main]]
+#    name = "Twitter"
+#    url = "https://twitter.com/AndrewWohlfeil/"
 
 [params]
     description = "A website built through Hugo and blogdown."
@@ -33,6 +39,9 @@ ignoreFiles = ["\\.Rmd$", "\\.Rmarkdown$", "_files$", "_cache$"]
 
     # path to the favicon, under "static"
     favicon = "favicon.ico"
+    
+    author = "Andrew Wohlfeil"
+    date_format = "Mon, Jan 2, 2006"
 
     [params.logo]
     # main logo top right corner
@@ -41,3 +50,17 @@ ignoreFiles = ["\\.Rmd$", "\\.Rmarkdown$", "_files$", "_cache$"]
     height = 50
     alt = "Logo"
 
+[[params.social]]
+    icon = "github"
+    icon_pack = "fa"
+    link = "//github.com/wohlfeila"
+    
+[[params.social]]
+    icon = "twitter"
+    icon_pack = "fa"
+    link = "//twitter.com/AndrewWohlfeil"    
+
+[[params.social]]
+    icon = "linkedin"
+    icon_pack = "fa"
+    link = "//www.linkedin.com/in/andrew-wohlfeil-441b6591/"    
