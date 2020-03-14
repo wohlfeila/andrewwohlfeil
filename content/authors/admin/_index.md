@@ -2,6 +2,14 @@
 authors:
 - admin
 bio: Experienced Data Scientist with a demonstrated history of working in the financial services industry. Skilled in R, Financial Analysis, NLP, and Time Series Analysis. Professional with a Master’s Degree focused in Applied Economics from Johns Hopkins University Advanced Academic Programs. 
+education:
+  courses:
+  - course: MS in Applied Economics
+    institution: Johns Hopkins University
+    year: 2018
+  - course: BSc in Economics
+    institution: University of Wisconsin - River Falls
+    year: 2013
 interests:
 - Artificial Intelligence
 - NLP
