@@ -25,7 +25,7 @@ theme = "hugo-academic"
 # Get last modified date for content from Git?
 enableGitInfo = false
 
-HUGO_VERSION = 0.19
+HUGO_VERSION = "hugo_0.19"
 
 # Default language to use (if you setup multilingual support)
 defaultContentLanguage = "en"
